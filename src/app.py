@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 import os
 from pathlib import Path
+from database import db_manager, activity_repo, user_repo, registration_repo
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -19,7 +20,7 @@ current_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
           "static")), name="static")
 
-# In-memory activity database
+# In-memory activity database (for migration to database)
 activities = {
     "Chess Club": {
         "description": "Learn strategies and compete in chess tournaments",
@@ -77,6 +78,9 @@ activities = {
     }
 }
 
+# Migrate existing data to database
+db_manager.migrate_existing_data(activities)
+
 
 @app.get("/")
 def root():
@@ -85,28 +89,32 @@ def root():
 
 @app.get("/activities")
 def get_activities():
-    return activities
+    """Get all activities from database"""
+    return activity_repo.get_all_activities()
 
 
 @app.post("/activities/{activity_name}/signup")
 def signup_for_activity(activity_name: str, email: str):
     """Sign up a student for an activity"""
     # Validate activity exists
-    if activity_name not in activities:
+    if not activity_repo.activity_exists(activity_name):
         raise HTTPException(status_code=404, detail="Activity not found")
 
-    # Get the specific activity
-    activity = activities[activity_name]
+    # Get activity ID
+    activity_id = activity_repo.get_activity_id(activity_name)
+    
+    # Get or create user
+    user_id = user_repo.get_or_create_user(email)
 
     # Validate student is not already signed up
-    if email in activity["participants"]:
+    if user_repo.is_user_registered(user_id, activity_id):
         raise HTTPException(
             status_code=400,
             detail="Student is already signed up"
         )
 
-    # Add student
-    activity["participants"].append(email)
+    # Add student registration
+    registration_repo.register_user(user_id, activity_id)
     return {"message": f"Signed up {email} for {activity_name}"}
 
 
@@ -114,19 +122,25 @@ def signup_for_activity(activity_name: str, email: str):
 def unregister_from_activity(activity_name: str, email: str):
     """Unregister a student from an activity"""
     # Validate activity exists
-    if activity_name not in activities:
+    if not activity_repo.activity_exists(activity_name):
         raise HTTPException(status_code=404, detail="Activity not found")
 
-    # Get the specific activity
-    activity = activities[activity_name]
+    # Get activity ID
+    activity_id = activity_repo.get_activity_id(activity_name)
+    
+    # Get user ID (must exist if they're registered)
+    user_id = user_repo.get_or_create_user(email)
 
     # Validate student is signed up
-    if email not in activity["participants"]:
+    if not user_repo.is_user_registered(user_id, activity_id):
         raise HTTPException(
             status_code=400,
             detail="Student is not signed up for this activity"
         )
 
-    # Remove student
-    activity["participants"].remove(email)
-    return {"message": f"Unregistered {email} from {activity_name}"}
+    # Remove student registration
+    success = registration_repo.unregister_user(user_id, activity_id)
+    if success:
+        return {"message": f"Unregistered {email} from {activity_name}"}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to unregister student")
